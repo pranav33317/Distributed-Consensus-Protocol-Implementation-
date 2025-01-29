@@ -1,0 +1,201 @@
+#include <iostream>
+#include <vector>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <random>
+#include <mutex>
+
+using namespace std;
+
+// Constants for timeouts and heartbeat intervals
+const int ELECTION_TIMEOUT = 3;  // seconds
+const int HEARTBEAT_INTERVAL = 1;  // seconds
+
+// Raft node states
+enum RaftState { FOLLOWER, CANDIDATE, LEADER };
+
+// RaftNode class representing each node in the cluster
+class RaftNode {
+public:
+    int node_id;
+    RaftState state;
+    int current_term;
+    int votes;
+    int commit_index;
+    vector<string> log;
+    chrono::steady_clock::time_point last_heartbeat;
+
+    atomic<bool> is_leader;
+
+    RaftNode(int id) : node_id(id), state(FOLLOWER), current_term(0), votes(0), commit_index(0), is_leader(false) {
+        last_heartbeat = chrono::steady_clock::now();
+    }
+
+    // Reset election timeout
+    void reset_heartbeat() {
+        last_heartbeat = chrono::steady_clock::now();
+        state = FOLLOWER;
+        votes = 0;
+    }
+
+    // Start election process
+    void start_election(vector<RaftNode*>& cluster) {
+        if (state != LEADER) {
+            state = CANDIDATE;
+            current_term++;
+            votes = 1;  // Vote for itself
+            cout << "Node " << node_id << " is starting election (term: " << current_term << ")\n";
+
+            // Send vote requests to other nodes
+            for (auto node : cluster) {
+                if (node->node_id != node_id) {
+                    thread(&RaftNode::request_vote, node, this).detach();
+                }
+            }
+        }
+    }
+
+    // Request vote from another node
+    void request_vote(RaftNode* candidate) {
+        if (current_term == candidate->current_term) {
+            votes++;
+            if (votes > cluster_size() / 2) {
+                become_leader();
+            }
+        }
+    }
+
+    // Become the leader after winning the election
+    void become_leader() {
+        if (state != LEADER) {
+            state = LEADER;
+            is_leader = true;
+            cout << "Node " << node_id << " becomes the leader (term: " << current_term << ")\n";
+            // Start sending heartbeats
+            send_heartbeats();
+        }
+    }
+
+    // Send heartbeats to followers
+    void send_heartbeats() {
+        while (is_leader) {
+            this_thread::sleep_for(chrono::seconds(HEARTBEAT_INTERVAL));
+            for (auto node : cluster) {
+                if (node->node_id != node_id) {
+                    thread(&RaftNode::receive_heartbeat, node, this).detach();
+                }
+            }
+            cout << "Node " << node_id << " sending heartbeat\n";
+        }
+    }
+
+    // Receive heartbeat from leader
+    void receive_heartbeat(RaftNode* leader) {
+        if (state != LEADER) {
+            reset_heartbeat();
+        }
+    }
+
+    // Append log entry
+    void append_log(const string& entry) {
+        if (state == LEADER) {
+            log.push_back(entry);
+            commit_index = log.size() - 1;
+            cout << "Node " << node_id << " appends log entry: " << entry << "\n";
+            replicate_log(entry);
+        }
+    }
+
+    // Replicate log entry to followers
+    void replicate_log(const string& entry) {
+        for (auto node : cluster) {
+            if (node->node_id != node_id) {
+                thread(&RaftNode::receive_log, node, entry).detach();
+            }
+        }
+    }
+
+    // Receive log entry from leader
+    void receive_log(const string& entry) {
+        if (state != LEADER) {
+            log.push_back(entry);
+            commit_index = log.size() - 1;
+            cout << "Node " << node_id << " receives log entry: " << entry << "\n";
+            reset_heartbeat();
+        }
+    }
+
+    // Simulate failure (crash)
+    void simulate_failure() {
+        if (state == LEADER) {
+            cout << "Node " << node_id << " (Leader) is failing/crashing\n";
+            state = FOLLOWER;
+            is_leader = false;
+            this_thread::sleep_for(chrono::seconds(random_failure_time()));
+            cout << "Node " << node_id << " is recovering\n";
+            start_election(cluster);
+        }
+    }
+
+private:
+    // Simulate random failure recovery time between 2 and 5 seconds
+    int random_failure_time() {
+        random_device rd;
+        mt19937 gen(rd());
+        uniform_int_distribution<> dis(2, 5);
+        return dis(gen);
+    }
+
+    // Get the size of the cluster
+    size_t cluster_size() {
+        return cluster.size();
+    }
+
+    // Static reference to the Raft cluster
+    static vector<RaftNode*> cluster;
+};
+
+// Static definition of the cluster (initialized later)
+vector<RaftNode*> RaftNode::cluster;
+
+// Main function to simulate the cluster and operations
+void simulate_raft_cluster() {
+    // Create a cluster of 5 nodes
+    for (int i = 0; i < 5; i++) {
+        RaftNode* node = new RaftNode(i);
+        RaftNode::cluster.push_back(node);
+    }
+
+    // Start the Raft protocol by triggering the election process
+    for (auto node : RaftNode::cluster) {
+        thread(&RaftNode::start_election, node, RaftNode::cluster).detach();
+    }
+
+    // Let the system run for a while
+    this_thread::sleep_for(chrono::seconds(10));
+
+    // Simulate failures
+    for (int i = 0; i < 3; i++) {
+        RaftNode* random_node = RaftNode::cluster[rand() % 5];
+        random_node->simulate_failure();
+    }
+
+    // Let the system run for a while more
+    this_thread::sleep_for(chrono::seconds(10));
+
+    // Display the final logs of all nodes
+    for (auto node : RaftNode::cluster) {
+        cout << "Node " << node->node_id << " final log: ";
+        for (auto& log_entry : node->log) {
+            cout << log_entry << " ";
+        }
+        cout << endl;
+    }
+}
+
+int main() {
+    // Run the simulation
+    simulate_raft_cluster();
+    return 0;
+}
